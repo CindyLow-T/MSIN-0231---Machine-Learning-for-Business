@@ -1,5 +1,3 @@
-## use this ver if error
-
 # ============================================================
 # Market Research Assistant (Streamlit)
 #
