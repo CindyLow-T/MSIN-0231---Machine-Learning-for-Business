@@ -3,3 +3,4 @@ openai
 langchain-community
 numpy
 reportlab
+wikipedia>=1.4.0
