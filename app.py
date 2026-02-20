@@ -165,7 +165,7 @@ with st.sidebar:
         st.success("API key saved for this session.")
         st.caption("Refreshing the page clears the session key.")
     else:
-        st.warning("Paste your OpenAI API key to enable report generation.")
+        st.warning("Paste your OpenAI API key to enable report generation. Refreshing the page clears the session key.")
 
 
 api_ready = bool((st.session_state.get("OPENAI_API_KEY") or "").strip())
