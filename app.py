@@ -154,6 +154,13 @@ if "is_generating" not in st.session_state:
 if "cancel_requested" not in st.session_state:
     st.session_state["cancel_requested"] = False
 
+if "cancel_notice" not in st.session_state:
+    st.session_state["cancel_notice"] = ""
+
+if st.session_state.get("cancel_notice"):
+    st.warning(st.session_state["cancel_notice"])
+    st.session_state["cancel_notice"] = ""
+
 
 # ============================================================
 # Sidebar: LLM selection + API key input
@@ -207,14 +214,14 @@ def safe_stop(message: str):
 def check_cancel():
     """
     Soft cancel:
-    - If user clicked "Cancel generation", we abort at the next checkpoint.
-    - Note: this cannot interrupt a blocking network call mid-flight.
+    - Unlock UI
+    - Force rerun so the form re-renders enabled
     """
     if st.session_state.get("cancel_requested", False):
-        st.session_state["is_generating"] = False          # unlock UI
-        st.session_state["cancel_requested"] = False       # reset flag
-        st.warning("Generation cancelled.")
-        st.stop()
+        st.session_state["is_generating"] = False
+        st.session_state["cancel_requested"] = False
+        st.session_state["cancel_notice"] = "Generation cancelled."
+        st.rerun()
 
 
 def normalize_key(s: str) -> str:
@@ -780,6 +787,7 @@ if st.session_state.get("is_generating", False):
     with colA:
         if st.button("Cancel generation"):
             st.session_state["cancel_requested"] = True
+            st.rerun()  # ✅ immediate rerun so checkpoints pick it up ASAP
     with colB:
         st.info("Generating… you can cancel, but the app may only stop between steps.")
 
