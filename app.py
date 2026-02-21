@@ -210,7 +210,7 @@ def check_cancel():
     - If user clicked "Cancel generation", we abort at the next checkpoint.
     - Note: this cannot interrupt a blocking network call mid-flight.
     """
-    if st.session_state.get("cancel_requested"):
+    if st.session_state.get("cancel_requested", False):
         st.session_state["is_generating"] = False          # unlock UI
         st.session_state["cancel_requested"] = False       # reset flag
         st.warning("Generation cancelled.")
@@ -825,7 +825,7 @@ def build_pdf_bytes(title: str, report_markdown: str) -> bytes:
 
 # If a generation is currently running, show a cancel button (soft-cancel)
 # Note: this triggers a rerun; cancellation is picked up at the next checkpoint.
-if st.session_state["is_generating"]:
+if st.session_state.get("is_generating", False):
     colA, colB = st.columns([1, 2])
     with colA:
         if st.button("Cancel generation"):
@@ -838,11 +838,11 @@ with st.form("industry_form"):
     industry_input = st.text_input(
         "Industry",
         placeholder="e.g. video game industry / kpop industry",
-        disabled=st.session_state["is_generating"]   # lock input while running (clear UX)
+        disabled=st.session_state["is_generating", False]   # lock input while running (clear UX)
     )
     submitted = st.form_submit_button(
         "Generate report",
-        disabled=(not api_ready) or st.session_state["is_generating"]  # lock button while running
+        disabled=(not api_ready) or st.session_state["is_generating", False]  # lock button while running
     )
 
 
