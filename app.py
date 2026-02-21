@@ -59,7 +59,7 @@ RETRIEVER_TOP_K = 15                      # raw wikipedia results fetched for th
 TOP_K_EVIDENCE_CHUNKS = 6                 # evidence chunks used in REPORT generation
 CHUNK_SIZE = 1200                         # chunk length for embedding
 CHUNK_OVERLAP = 150                       # overlap to reduce boundary loss
-MAX_CHUNKS_TO_EMBED = 40                  # cost/speed cap for chunks
+MAX_CHUNKS_TO_EMBED = 25                  # cost/speed cap for chunks
 EMBED_BATCH_SIZE = 64                     # embedding API batch size
 
 # Chatbot settings (Wikipedia-only, dynamic retrieval per question)
