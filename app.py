@@ -56,7 +56,7 @@ MAX_OUTPUT_TOKENS = 900                   # report token cap (tries to stay <500
 TOP_K_PAGES = 5                           # final "industry-level" pages for the report
 RETRIEVER_TOP_K = 15                      # raw wikipedia results fetched for the report pipeline
 
-TOP_K_EVIDENCE_CHUNKS = 6                 # evidence chunks used in REPORT generation
+TOP_K_EVIDENCE_CHUNKS = TOP_K_PAGES       # evidence chunks used in REPORT generation
 CHUNK_SIZE = 1200                         # chunk length for embedding
 CHUNK_OVERLAP = 150                       # overlap to reduce boundary loss
 MAX_CHUNKS_TO_EMBED = 25                  # cost/speed cap for chunks
