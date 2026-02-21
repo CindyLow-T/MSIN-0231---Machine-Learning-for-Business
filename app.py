@@ -83,7 +83,6 @@ st.set_page_config(
     layout="centered",
 )
 
-# ---- Simple CSS to make the report look less "raw markdown" ----
 st.markdown(
     """
     <style>
@@ -113,46 +112,40 @@ st.caption(
 # ============================================================
 # Session state defaults (for reruns)
 # ============================================================
+
 if "OPENAI_API_KEY" not in st.session_state:
     st.session_state["OPENAI_API_KEY"] = ""
+
 if "api_key_input" not in st.session_state:
     st.session_state["api_key_input"] = ""
 
 if "report_ready" not in st.session_state:
     st.session_state["report_ready"] = False
+
 if "saved_industry" not in st.session_state:
     st.session_state["saved_industry"] = ""
+
 if "saved_report" not in st.session_state:
     st.session_state["saved_report"] = ""
+
 if "saved_context" not in st.session_state:
     st.session_state["saved_context"] = ""
+
 if "saved_pages" not in st.session_state:
-    st.session_state["saved_pages"] = []
+    st.session_state["saved_pages"] = []   # list of {"title": ..., "url": ...}
 
 if "chat_history" not in st.session_state:
     st.session_state["chat_history"] = []
+
+# Most recent chatbot retrieval (collapsible UI without nested expander)
 if "last_answer_sources" not in st.session_state:
-    st.session_state["last_answer_sources"] = []
+    st.session_state["last_answer_sources"] = []  # list of {"title":..., "url":...}
 if "last_answer_evidence" not in st.session_state:
     st.session_state["last_answer_evidence"] = ""
 
-# --- Run coordination  ---
-# --- Latest-submit-wins run control ---
-if "run_state" not in st.session_state:
-    st.session_state["run_state"] = "idle"          # "idle" | "running"
-if "active_run_id" not in st.session_state:
-    st.session_state["active_run_id"] = 0
-if "latest_request_id" not in st.session_state:
-    st.session_state["latest_request_id"] = 0
-
-if "run_industry" not in st.session_state:
-    st.session_state["run_industry"] = ""
-if "pending_industry" not in st.session_state:
-    st.session_state["pending_industry"] = ""       # ALWAYS overwritten by latest submit
-
 
 # ============================================================
-# Sidebar: API key input
+# Sidebar: LLM selection + API key input
 # ============================================================
 
 def save_key_and_clear():
@@ -164,7 +157,7 @@ def save_key_and_clear():
 
 with st.sidebar:
     st.header("⚙️ Settings")
-    st.selectbox("Select LLM", options=[MODEL_LLM], index=0)
+    llm_choice = st.selectbox("Select LLM", options=[MODEL_LLM], index=0)
 
     st.markdown("---")
     st.subheader("🔐 OpenAI API Key")
@@ -177,11 +170,11 @@ with st.sidebar:
         on_change=save_key_and_clear
     )
 
-    if (st.session_state.get("OPENAI_API_KEY") or "").strip():
+    if st.session_state["OPENAI_API_KEY"]:
         st.success("API key saved for this session.")
         st.caption("Refreshing the page clears the session key.")
     else:
-        st.warning("Paste your OpenAI API key to enable report generation. Refreshing the page clears the session key.")
+        st.warning("Paste your OpenAI API key to enable report generation.")
 
 
 api_ready = bool((st.session_state.get("OPENAI_API_KEY") or "").strip())
@@ -199,6 +192,10 @@ def safe_stop(message: str):
 
 
 def normalize_key(s: str) -> str:
+    """
+    Lowercase and remove non-alphanumeric characters.
+    This makes 'kpop' match 'K-pop', 'e-commerce' match 'ecommerce', etc.
+    """
     s = (s or "").lower()
     return re.sub(r"[^a-z0-9]+", "", s)
 
@@ -245,10 +242,17 @@ def embed_batched(client: OpenAI, texts: list[str]) -> list[np.ndarray]:
 
 @st.cache_data(show_spinner=False)
 def cached_embeddings(texts: list[str], cache_key: str):
+    """
+    Cache embeddings so repeat runs (same query/chunks) are faster and cheaper.
+    - We do NOT include the API key in cache args.
+    - We fetch the key from session_state at runtime.
+    """
     _ = cache_key
+
     api_key_local = (st.session_state.get("OPENAI_API_KEY") or "").strip()
     if not api_key_local:
         safe_stop("Missing API key. Paste your OpenAI API key in the sidebar first.")
+
     client = OpenAI(api_key=api_key_local)
     vecs = embed_batched(client, texts)
     return [v.tolist() for v in vecs]
@@ -288,6 +292,9 @@ def is_negative_title(title: str) -> bool:
 
 
 def core_query(user_input: str) -> str:
+    """
+    Remove common industry intent words so 'kpop industry' -> 'kpop'
+    """
     q = (user_input or "").lower()
     for kw in POSITIVE_TITLE_KEYWORDS:
         q = re.sub(rf"\b{re.escape(kw)}\b", " ", q, flags=re.IGNORECASE)
@@ -296,28 +303,38 @@ def core_query(user_input: str) -> str:
 
 
 def title_score(title: str, user_industry: str) -> float:
+    """
+    Improved scoring that is robust to hyphens/spacing:
+    - 'kpop' matches 'K-pop'
+    """
     t_raw = (title or "").strip()
     t = t_raw.lower()
-    q = (user_industry or "").strip().lower()
+    q_raw = (user_industry or "").strip()
+    q = q_raw.lower()
 
     q_core = core_query(q)
+
     score = 0.0
 
+    # A) boost for industry-ish keywords in title
     for kw in POSITIVE_TITLE_KEYWORDS:
         if kw in t:
             score += 2.0
 
+    # B) normalization match (kpop vs k-pop)
     if q_core:
         qk = normalize_key(q_core)
         if qk and qk in normalize_key(t_raw):
             score += 3.0
 
+    # C) token overlap on core query
     if q_core:
         q_tokens = [x for x in re.split(r"\W+", q_core) if x]
         t_tokens = set([x for x in re.split(r"\W+", t) if x])
         overlap = sum(1 for tok in q_tokens if tok in t_tokens)
         score += min(2.0, overlap * 0.7)
 
+    # D) downweight list pages
     if t.startswith("list of"):
         score -= 2.0
 
@@ -345,7 +362,7 @@ def filter_industry_pages(docs, user_industry: str, k: int):
 
 
 # ============================================================
-# Chatbot-only filtering
+# Chatbot-only filtering (light filter; does not change report pipeline)
 # ============================================================
 
 CHAT_EXCLUDE_TITLE_PATTERNS = [
@@ -356,8 +373,12 @@ CHAT_EXCLUDE_TITLE_PATTERNS = [
     r"^Portal:",
 ]
 
-
 def filter_chat_pages(raw_docs, k: int):
+    """
+    Chatbot only: keep the net wide.
+    Only remove Wikipedia meta/disambiguation pages.
+    Do NOT exclude (company), List of, etc. (those can be relevant for Q&A).
+    """
     kept = []
     for d in raw_docs:
         title = (d.metadata.get("title", "") or "").strip()
@@ -368,6 +389,13 @@ def filter_chat_pages(raw_docs, k: int):
 
 
 def likely_unrelated_to_industry(industry_term: str, sources: list[dict], evidence_text: str) -> bool:
+    """
+    Soft, evidence-based gate:
+    - If we have evidence, treat it as related.
+    - If evidence is empty AND none of the top source titles contains the industry's core term,
+      then it's likely unrelated (or Wikipedia can't retrieve relevant pages).
+    This reduces false 'unrelated' claims.
+    """
     if evidence_text and evidence_text.strip():
         return False
 
@@ -385,10 +413,18 @@ def likely_unrelated_to_industry(industry_term: str, sources: list[dict], eviden
 
 
 # ============================================================
-# Industry intent gate (report entry)
+# Industry-intent gate - used only for the report generation entry
 # ============================================================
 
 def industry_intent_gate(user_input: str):
+    """
+    Robust intent gate:
+    - Retrieve top Wikipedia results
+    - Score titles for industry relevance
+    - Accept if:
+        (1) best score >= threshold OR
+        (2) user typed 'industry/market/sector' AND top titles match the core term (normalized)
+    """
     retriever = WikipediaRetriever(top_k_results=INTENT_CHECK_TOP_K)
     raw_docs = retriever.invoke(user_input)
 
@@ -441,7 +477,7 @@ def suggest_industry_correction(user_input: str) -> str | None:
 
 
 # ============================================================
-# Evidence retrieval (embeddings-based)
+# Evidence retrieval (embeddings-based chunk selection)
 # ============================================================
 
 def retrieve_relevant_context(docs, query: str, top_k_chunks: int):
@@ -487,6 +523,14 @@ def retrieve_relevant_context(docs, query: str, top_k_chunks: int):
 
 
 def retrieve_chat_evidence(user_question: str, industry_term: str):
+    """
+    Chatbot only (Wikipedia-only RAG):
+    - Retrieves fresh Wikipedia pages for the user's question
+    - Uses a LIGHT filter (only removes meta/disambiguation)
+    - Embedding-reranks chunks using an industry-aware rerank query
+    Returns:
+      evidence_text, sources(list of dict title/url)
+    """
     retriever = WikipediaRetriever(top_k_results=CHAT_RETRIEVER_TOP_K)
     raw_docs = retriever.invoke(user_question)
 
@@ -554,32 +598,41 @@ Write a concise industry report with:
 9) Strategic implications for a large corporation
 """
 
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
     resp = client.chat.completions.create(
-        model=MODEL_LLM,
+        model=llm_choice,
         temperature=TEMPERATURE,
         max_tokens=MAX_OUTPUT_TOKENS,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
+        messages=messages,
     )
 
     text = resp.choices[0].message.content or ""
     finish_reason = resp.choices[0].finish_reason
 
     if finish_reason == "length":
+        messages.append({"role": "assistant", "content": text})
+        messages.append({
+            "role": "user",
+            "content": (
+                "Continue exactly where you left off. "
+                "Do not restart. Finish the last incomplete sentence first. "
+                "Keep the entire report under 500 words total."
+            )
+        })
+
         resp2 = client.chat.completions.create(
-            model=MODEL_LLM,
+            model=llm_choice,
             temperature=TEMPERATURE,
             max_tokens=300,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-                {"role": "assistant", "content": text},
-                {"role": "user", "content": "Continue exactly where you left off. Finish the last incomplete sentence first."},
-            ],
+            messages=messages,
         )
-        text = text + (resp2.choices[0].message.content or "")
+
+        text2 = resp2.choices[0].message.content or ""
+        text = text + text2
 
     return text
 
@@ -689,121 +742,74 @@ def build_pdf_bytes(title: str, report_markdown: str) -> bytes:
 
 
 # ============================================================
-# Main UI: input stays editable; submit queues new industry if running
+# Main UI: industry input + run button
 # ============================================================
 
-# Show a small status while a run is active (no cancel)
-if st.session_state.get("run_state") == "running":
-    st.info("Generating… you can keep editing the industry field. Submit to queue a new industry.")
-
 with st.form("industry_form"):
-    st.text_input(
-        "Industry",
-        placeholder="e.g. video game industry / kpop industry",
-        key="industry_input",
-        disabled=False,  # always editable
-    )
+    industry_input = st.text_input("Industry", placeholder="e.g. video game industry / kpop industry")
     submitted = st.form_submit_button("Generate report", disabled=not api_ready)
 
 
 # ============================================================
-# Submit behaviour:
-# - If idle: start run immediately
-# - If running: store pending_industry; run starts automatically after current run finishes
+# Generate report (only when button is clicked)
+# - Industry-intent gate prevents random names from generating a report
 # ============================================================
 
 if submitted:
-    new_industry = (st.session_state.get("industry_input") or "").strip()
+    industry = (industry_input or "").strip()
+    api_key_local = (st.session_state.get("OPENAI_API_KEY") or "").strip()
 
-    if not new_industry:
+    if not api_key_local:
+        safe_stop("Missing API key. Please paste your OpenAI API key in the sidebar first.")
+    if not industry:
         st.warning("Please enter an industry.")
         st.stop()
 
-    # Every submit increments the "latest_request_id"
-    st.session_state["latest_request_id"] += 1
-    newest_id = st.session_state["latest_request_id"]
+    # --- Industry intent gate BEFORE doing the full pipeline ---
+    ok, best_title, best_score, top_titles, _ = industry_intent_gate(industry)
+    if not ok:
+        st.warning(
+            "That input doesn't look like an industry term based on Wikipedia's top matches.\n\n"
+            "Try a broader industry label like:\n"
+            "- video game industry\n"
+            "- semiconductor industry\n"
+            "- airline industry\n"
+            "- fast fashion market\n\n"
+            "Top Wikipedia matches for your input were:\n"
+            + "\n".join([f"- {t}" for t in top_titles])
+        )
+        st.stop()
 
-    # Always store the latest submitted industry (overwrite, not queue)
-    st.session_state["pending_industry"] = new_industry
+    client = OpenAI(api_key=api_key_local)
 
-    if st.session_state.get("run_state") == "running":
-        st.success("Updated. The app will switch to your latest submitted industry ASAP.")
-        st.rerun()
+    suggestion = suggest_industry_correction(industry)
+    if suggestion:
+        st.info(f"Did you mean **{suggestion}**?")
+        if st.button("Use suggested spelling"):
+            industry = suggestion
 
-    # If idle, start immediately with the latest submission
-    st.session_state["run_state"] = "running"
-    st.session_state["active_run_id"] = newest_id
-    st.session_state["run_industry"] = new_industry
-    st.session_state["report_ready"] = False
+    retrieval_query = f"Provide an industry overview of the {industry}."
 
-    st.rerun()
+    with st.status("Retrieving Wikipedia pages…", expanded=False):
+        retriever = WikipediaRetriever(top_k_results=RETRIEVER_TOP_K)
+        raw_docs = retriever.invoke(industry)
 
+    if not raw_docs:
+        safe_stop("No Wikipedia pages found for that term. Try a broader or more standard industry name.")
 
-# ============================================================
-# Run pipeline
-# ============================================================
+    docs, excluded = filter_industry_pages(raw_docs, industry, k=TOP_K_PAGES)
 
-if st.session_state.get("run_state") == "running":
-    api_key_local = (st.session_state.get("OPENAI_API_KEY") or "").strip()
-    if not api_key_local:
-        safe_stop("Missing API key. Please paste your OpenAI API key in the sidebar first.")
+    if not docs:
+        safe_stop(
+            "Wikipedia returned results, but none looked industry-level after filtering. "
+            "Try a broader label like 'video game industry' or 'semiconductor industry'."
+        )
 
-    current_run_id = st.session_state.get("active_run_id", 0)
-    industry = (st.session_state.get("run_industry") or "").strip()
+    with st.status("Generating industry report…", expanded=False):
+        context, evidence_meta = retrieve_relevant_context(docs, retrieval_query, top_k_chunks=TOP_K_EVIDENCE_CHUNKS)
+        page_titles = [d.metadata.get("title", "Wikipedia") for d in docs]
+        report = generate_report(client, industry, context, page_titles)
 
-    with st.spinner(f"Loading… generating report for: {industry}"):
-        # --- your existing pipeline here ---
-        ok, best_title, best_score, top_titles, _ = industry_intent_gate(industry)
-        if not ok:
-            st.warning(
-                "That input doesn't look like an industry term based on Wikipedia's top matches.\n\n"
-                "Top Wikipedia matches:\n" + "\n".join([f"- {t}" for t in top_titles])
-            )
-
-            # end this run
-            st.session_state["run_state"] = "idle"
-            # if user has submitted something newer, start it
-            latest = st.session_state.get("latest_request_id", 0)
-            pending = (st.session_state.get("pending_industry") or "").strip()
-            if pending and latest > current_run_id:
-                st.session_state["run_state"] = "running"
-                st.session_state["active_run_id"] = latest
-                st.session_state["run_industry"] = pending
-                st.session_state["report_ready"] = False
-                st.rerun()
-            st.stop()
-
-        client = OpenAI(api_key=api_key_local)
-
-        with st.status("Retrieving Wikipedia pages…", expanded=False):
-            retriever = WikipediaRetriever(top_k_results=RETRIEVER_TOP_K)
-            raw_docs = retriever.invoke(industry)
-
-        docs, _excluded = filter_industry_pages(raw_docs, industry, k=TOP_K_PAGES)
-
-        with st.status("Generating industry report…", expanded=False):
-            retrieval_query = f"Provide an industry overview of the {industry}."
-            context, _ = retrieve_relevant_context(docs, retrieval_query, top_k_chunks=TOP_K_EVIDENCE_CHUNKS)
-            page_titles = [d.metadata.get("title", "Wikipedia") for d in docs]
-            report = generate_report(client, industry, context, page_titles)
-
-    # ================================
-    # Discard stale run results
-    # ================================
-    latest = st.session_state.get("latest_request_id", 0)
-    pending = (st.session_state.get("pending_industry") or "").strip()
-
-    if latest > current_run_id and pending:
-        # User submitted something newer while we were running -> ignore this run’s outputs
-        st.session_state["run_state"] = "running"
-        st.session_state["active_run_id"] = latest
-        st.session_state["run_industry"] = pending
-        st.session_state["report_ready"] = False
-        st.rerun()
-
-    # ================================
-    # save result (only if still latest)
-    # ================================
     st.session_state["saved_industry"] = industry
     st.session_state["saved_report"] = report
     st.session_state["saved_context"] = context
@@ -815,14 +821,13 @@ if st.session_state.get("run_state") == "running":
     st.session_state["last_answer_sources"] = []
     st.session_state["last_answer_evidence"] = ""
     st.session_state["report_ready"] = True
-    st.session_state["run_state"] = "idle"
 
 
 # ============================================================
 # Render report + PDF + chatbot whenever report_ready is True
 # ============================================================
 
-if st.session_state.get("report_ready", False):
+if st.session_state.get("report_ready"):
     industry = st.session_state.get("saved_industry", "")
     report = st.session_state.get("saved_report", "")
     pages = st.session_state.get("saved_pages", [])
@@ -859,6 +864,8 @@ if st.session_state.get("report_ready", False):
 
     # ============================================================
     # Chatbot: Wikipedia-only, dynamic retrieval per question
+    # - No nested expanders (uses checkbox)
+    # - Softer "unrelated" logic (only when truly likely unrelated)
     # ============================================================
 
     st.markdown("## Follow-up Q&A")
@@ -871,14 +878,15 @@ if st.session_state.get("report_ready", False):
     with st.expander("Ask questions about this industry", expanded=True):
         st.caption(
             "Each question retrieves additional Wikipedia pages relevant to your question. "
-            "Answers are grounded only in Wikipedia evidence retrieved for that question."
+            "Answers are grounded ONLY in Wikipedia evidence retrieved for that question."
         )
 
-        if st.session_state.get("last_answer_sources") or st.session_state.get("last_answer_evidence"):
+        # Collapsible evidence + sources for the LAST answer (NO nested expander)
+        if st.session_state["last_answer_sources"] or st.session_state["last_answer_evidence"]:
             show_last = st.checkbox("Show evidence + Wikipedia pages used for the last answer", value=False)
 
             if show_last:
-                if st.session_state.get("last_answer_sources"):
+                if st.session_state["last_answer_sources"]:
                     st.write("**Wikipedia pages (last answer):**")
                     for s in st.session_state["last_answer_sources"]:
                         title = s.get("title", "Wikipedia")
@@ -888,11 +896,12 @@ if st.session_state.get("report_ready", False):
                         else:
                             st.write(f"- {title}")
 
-                if st.session_state.get("last_answer_evidence"):
+                if st.session_state["last_answer_evidence"]:
                     st.write("**Evidence chunks (last answer):**")
                     st.text(st.session_state["last_answer_evidence"])
 
-        for m in st.session_state.get("chat_history", []):
+        # Show chat history
+        for m in st.session_state["chat_history"]:
             with st.chat_message(m["role"]):
                 st.markdown(m["content"])
 
@@ -901,11 +910,14 @@ if st.session_state.get("report_ready", False):
         if user_q:
             st.session_state["chat_history"].append({"role": "user", "content": user_q})
 
+            # Dynamic Wikipedia retrieval for THIS question (industry-aware rerank)
             chat_evidence, chat_sources = retrieve_chat_evidence(user_q, industry)
 
+            # Store for the collapsible panel (last answer)
             st.session_state["last_answer_sources"] = chat_sources
             st.session_state["last_answer_evidence"] = chat_evidence
 
+            # Only warn as "unrelated" if it is very likely truly off-industry
             if likely_unrelated_to_industry(industry, chat_sources, chat_evidence):
                 st.session_state["chat_history"].append({
                     "role": "assistant",
@@ -985,7 +997,4 @@ If relevant, quote short phrases from evidence (no long quotes).
                 st.session_state["chat_history"] = []
                 st.session_state["last_answer_sources"] = []
                 st.session_state["last_answer_evidence"] = ""
-                st.session_state["run_state"] = "idle"
-                st.session_state["run_industry"] = ""
-                st.session_state["pending_industry"] = ""
                 st.rerun()
