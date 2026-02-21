@@ -158,11 +158,34 @@ if "last_answer_evidence" not in st.session_state:
 # ============================================================
 
 def save_key_and_clear():
-    """Save the pasted API key into session_state, then clear the input field."""
+    """
+    Validate the pasted API key immediately.
+    If valid → store in session_state.
+    If invalid → show error and do NOT store it.
+    """
+
     pasted = (st.session_state.get("api_key_input") or "").strip()
-    if pasted:
-        st.session_state["OPENAI_API_KEY"] = pasted  # store key for this session only
-        st.session_state["api_key_input"] = ""       # clear textbox UI
+
+    if not pasted:
+        return  # nothing entered
+
+    try:
+        # Create temporary client with pasted key
+        test_client = OpenAI(api_key=pasted)
+
+        # Lightweight validation call (very small + cheap)
+        test_client.models.list()
+
+        # If no exception, key is valid
+        st.session_state["OPENAI_API_KEY"] = pasted
+        st.session_state["api_key_input"] = ""  # clear input box
+
+    except Exception:
+        # Key invalid → do not store
+        st.session_state["OPENAI_API_KEY"] = ""
+        st.session_state["api_key_input"] = ""
+
+        st.error("Invalid OpenAI API key. Please check and try again.")
 
 
 with st.sidebar:
