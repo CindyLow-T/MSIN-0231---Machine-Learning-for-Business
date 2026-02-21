@@ -137,21 +137,18 @@ if "last_answer_evidence" not in st.session_state:
     st.session_state["last_answer_evidence"] = ""
 
 # --- Run coordination  ---
+# --- Latest-submit-wins run control ---
 if "run_state" not in st.session_state:
-    st.session_state["run_state"] = "idle"     # "idle" | "running"
+    st.session_state["run_state"] = "idle"          # "idle" | "running"
+if "active_run_id" not in st.session_state:
+    st.session_state["active_run_id"] = 0
+if "latest_request_id" not in st.session_state:
+    st.session_state["latest_request_id"] = 0
+
 if "run_industry" not in st.session_state:
     st.session_state["run_industry"] = ""
 if "pending_industry" not in st.session_state:
-    st.session_state["pending_industry"] = ""
-
-if "run_id" not in st.session_state:
-    st.session_state["run_id"] = 0             # increments each submit
-if "last_completed_run_id" not in st.session_state:
-    st.session_state["last_completed_run_id"] = 0
-
-# Persist textbox value across reruns
-if "industry_input" not in st.session_state:
-    st.session_state["industry_input"] = ""
+    st.session_state["pending_industry"] = ""       # ALWAYS overwritten by latest submit
 
 
 # ============================================================
@@ -722,19 +719,22 @@ if submitted:
         st.warning("Please enter an industry.")
         st.stop()
 
-    # If a run is already happening, queue the new industry
-    if st.session_state.get("run_state") == "running":
-        st.session_state["pending_industry"] = new_industry
-        st.success("Queued. Your new industry will run right after the current one finishes.")
-        st.stop()
+    # Every submit increments the "latest_request_id"
+    st.session_state["latest_request_id"] += 1
+    newest_id = st.session_state["latest_request_id"]
 
-    # Start a new run now
+    # Always store the latest submitted industry (overwrite, not queue)
+    st.session_state["pending_industry"] = new_industry
+
+    if st.session_state.get("run_state") == "running":
+        st.success("Updated. The app will switch to your latest submitted industry ASAP.")
+        st.rerun()
+
+    # If idle, start immediately with the latest submission
     st.session_state["run_state"] = "running"
+    st.session_state["active_run_id"] = newest_id
     st.session_state["run_industry"] = new_industry
     st.session_state["report_ready"] = False
-
-    # Bump run_id so the pipeline definitely runs
-    st.session_state["run_id"] += 1
 
     st.rerun()
 
@@ -743,91 +743,79 @@ if submitted:
 # Run pipeline
 # ============================================================
 
-# Run only if there's a new run_id not yet completed
-if (
-    st.session_state.get("run_state") == "running"
-    and st.session_state.get("run_id", 0) > st.session_state.get("last_completed_run_id", 0)
-):
+if st.session_state.get("run_state") == "running":
     api_key_local = (st.session_state.get("OPENAI_API_KEY") or "").strip()
-    industry = (st.session_state.get("run_industry") or "").strip()
-    current_run_id = st.session_state["run_id"]
-
     if not api_key_local:
         safe_stop("Missing API key. Please paste your OpenAI API key in the sidebar first.")
 
-    # This will now ALWAYS show when a run starts
-    with st.spinner(f"Loading… generating report for: {industry}"):
-        # --- Industry intent gate ---
-        ok, best_title, best_score, top_titles, _ = industry_intent_gate(industry)
+    current_run_id = st.session_state.get("active_run_id", 0)
+    industry = (st.session_state.get("run_industry") or "").strip()
 
+    with st.spinner(f"Loading… generating report for: {industry}"):
+        # --- your existing pipeline here ---
+        ok, best_title, best_score, top_titles, _ = industry_intent_gate(industry)
         if not ok:
             st.warning(
                 "That input doesn't look like an industry term based on Wikipedia's top matches.\n\n"
-                "Try a broader industry label like:\n"
-                "- video game industry\n"
-                "- semiconductor industry\n"
-                "- airline industry\n"
-                "- fast fashion market\n\n"
-                "Top Wikipedia matches for your input were:\n"
-                + "\n".join([f"- {t}" for t in top_titles])
+                "Top Wikipedia matches:\n" + "\n".join([f"- {t}" for t in top_titles])
             )
+
+            # end this run
             st.session_state["run_state"] = "idle"
-            st.session_state["last_completed_run_id"] = current_run_id
+            # if user has submitted something newer, start it
+            latest = st.session_state.get("latest_request_id", 0)
+            pending = (st.session_state.get("pending_industry") or "").strip()
+            if pending and latest > current_run_id:
+                st.session_state["run_state"] = "running"
+                st.session_state["active_run_id"] = latest
+                st.session_state["run_industry"] = pending
+                st.session_state["report_ready"] = False
+                st.rerun()
             st.stop()
 
         client = OpenAI(api_key=api_key_local)
 
-        # --- Retrieve pages ---
         with st.status("Retrieving Wikipedia pages…", expanded=False):
             retriever = WikipediaRetriever(top_k_results=RETRIEVER_TOP_K)
             raw_docs = retriever.invoke(industry)
 
-        if not raw_docs:
-            safe_stop("No Wikipedia pages found for that term. Try a broader or more standard industry name.")
+        docs, _excluded = filter_industry_pages(raw_docs, industry, k=TOP_K_PAGES)
 
-        # --- Filter industry pages ---
-        docs, excluded = filter_industry_pages(raw_docs, industry, k=TOP_K_PAGES)
-
-        if not docs:
-            safe_stop(
-                "Wikipedia returned results, but none looked industry-level after filtering. "
-                "Try a broader label like 'video game industry' or 'semiconductor industry'."
-            )
-
-        # --- Evidence + report ---
         with st.status("Generating industry report…", expanded=False):
             retrieval_query = f"Provide an industry overview of the {industry}."
-            context, evidence_meta = retrieve_relevant_context(docs, retrieval_query, top_k_chunks=TOP_K_EVIDENCE_CHUNKS)
+            context, _ = retrieve_relevant_context(docs, retrieval_query, top_k_chunks=TOP_K_EVIDENCE_CHUNKS)
             page_titles = [d.metadata.get("title", "Wikipedia") for d in docs]
             report = generate_report(client, industry, context, page_titles)
 
-        # --- Save outputs ---
-        st.session_state["saved_industry"] = industry
-        st.session_state["saved_report"] = report
-        st.session_state["saved_context"] = context
-        st.session_state["saved_pages"] = [
-            {"title": d.metadata.get("title", ""), "url": d.metadata.get("source", "")}
-            for d in docs
-        ]
-
-        st.session_state["chat_history"] = []
-        st.session_state["last_answer_sources"] = []
-        st.session_state["last_answer_evidence"] = ""
-        st.session_state["report_ready"] = True
-
-        # Mark run as completed (so it won't rerun forever)
-        st.session_state["last_completed_run_id"] = current_run_id
-        st.session_state["run_state"] = "idle"
-
-    # Auto-start queued industry (if user submitted during the run)
+    # ================================
+    # Discard stale run results
+    # ================================
+    latest = st.session_state.get("latest_request_id", 0)
     pending = (st.session_state.get("pending_industry") or "").strip()
-    if pending:
-        st.session_state["pending_industry"] = ""
+
+    if latest > current_run_id and pending:
+        # User submitted something newer while we were running -> ignore this run’s outputs
         st.session_state["run_state"] = "running"
+        st.session_state["active_run_id"] = latest
         st.session_state["run_industry"] = pending
         st.session_state["report_ready"] = False
-        st.session_state["run_id"] += 1
         st.rerun()
+
+    # ================================
+    # save result (only if still latest)
+    # ================================
+    st.session_state["saved_industry"] = industry
+    st.session_state["saved_report"] = report
+    st.session_state["saved_context"] = context
+    st.session_state["saved_pages"] = [
+        {"title": d.metadata.get("title", ""), "url": d.metadata.get("source", "")}
+        for d in docs
+    ]
+    st.session_state["chat_history"] = []
+    st.session_state["last_answer_sources"] = []
+    st.session_state["last_answer_evidence"] = ""
+    st.session_state["report_ready"] = True
+    st.session_state["run_state"] = "idle"
 
 
 # ============================================================
