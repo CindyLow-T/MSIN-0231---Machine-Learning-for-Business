@@ -1,3 +1,7 @@
+### MSIN 0231 _ Machine Learning for Business
+### Individual Coursework
+### Candidate Number: TXTZ3
+
 # ============================================================
 # Market Research Assistant (Streamlit)
 #
