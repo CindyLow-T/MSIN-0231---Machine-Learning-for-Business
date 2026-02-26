@@ -2,9 +2,9 @@
 ### Individual Coursework
 ### Candidate Number: TXTZ3
 
-# ===========================================================
+# ==========================================================
 # Market Research Assistant (Streamlit)
-# ===========================================================
+# ==========================================================
 # What this app does :
 # 1) Ask for an industry term (e.g., "video game industry")
 # 2) Pull related Wikipedia pages
